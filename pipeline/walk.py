@@ -1,10 +1,18 @@
 import numpy as np, cv2, sys
 from scipy import ndimage as ndi
 n=sys.argv[1]; wall=np.load(n+'_wall.npy').astype(np.uint8)
+# manual fixes from data/fixes/<id>.json (made with the Fix tool in the web page)
+#   {"open": [[x1, y1, x2, y2, width_m], ...], "wall": [[x1, y1, x2, y2], ...]}  coordinates in PDF points
+import json as _json, os as _os
+_fx=_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'..','data','fixes',n+'.json')
+if _os.path.exists(_fx):
+    _S=_json.load(open(n+'_meta.json'))['px_per_pt']; _f=_json.load(open(_fx))
+    for x1,y1,x2,y2,wd in _f.get('open',[]):
+        cv2.line(wall,(int(x1*_S),int(y1*_S)),(int(x2*_S),int(y2*_S)),0,max(2,int(wd*10)))
+    for x1,y1,x2,y2 in _f.get('wall',[]):
+        cv2.line(wall,(int(x1*_S),int(y1*_S)),(int(x2*_S),int(y2*_S)),1,2)
+    print(n,'applied fixes',len(_f.get('open',[])),'open',len(_f.get('wall',[])),'wall')
 H,W=wall.shape
-wall[int(0.79*H):,int(0.81*W):]=0
-rows=wall.sum(1)>0.55*W; cols=wall.sum(0)>0.55*H
-wall[rows,:]=0; wall[:,cols]=0
 el=lambda r:cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*r+1,2*r+1))
 # kill sheet frame + title block: keep only largest connected wall cluster region
 big=cv2.dilate(wall,el(15))

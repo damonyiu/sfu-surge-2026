@@ -1,7 +1,7 @@
 """Run the whole pipeline: PDFs in data/pdfs -> docs/index.html
 
     python pipeline/run.py            # every floor in config.py
-    python pipeline/run.py asb aq     # just these
+    python pipeline/run.py aq3 aq2    # re-extract just these floors (build step still uses all)
 """
 import os, sys, json, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,15 +23,16 @@ for n in ids:
         print(f"skip {n}: data/pdfs/{n}.pdf not found"); continue
     print(f"== {n}")
     step("grid.py", n)    # walls + door swings from the CAD vectors
-    step("walk.py", n)    # walkable area, rooms split from hallways
+    step("walk.py", n)    # walkable area, rooms split from hallways, manual fixes applied
     step("doors.py", n)   # which two spaces each door connects
-    step("ocr.py", n, "10", "0")  # room numbers (slow, ~1-2 min per floor)
-    step("build.py", n)   # 0.2 m cost grid + door dots + background image
+    step("ocr.py", n)     # room numbers, one region at a time (slowest step)
+    if n == "aq3" and os.path.exists(os.path.join(ROOT, "data", "aq3_sheet_ocr.json")):
+        step("merge_labels.py", n, os.path.join(ROOT, "data", "aq3_sheet_ocr.json"))
 
-floors = [json.load(open(os.path.join(WORK, f"{n}_floor.json"))) for n in FLOORS
-          if os.path.exists(os.path.join(WORK, f"{n}_floor.json"))]
+step("cores.py")          # elevator shafts on every floor
+step("build.py")          # shared crop, routing grids, doors, elevators -> build/floors.json
 tpl = open(os.path.join(ROOT, "web", "template.html")).read()
-html = tpl.replace("__FLOORS__", json.dumps(floors, separators=(",", ":")))
+html = tpl.replace("__FLOORS__", open(os.path.join(WORK, "floors.json")).read())
 os.makedirs(os.path.join(ROOT, "docs"), exist_ok=True)
 open(os.path.join(ROOT, "docs", "index.html"), "w").write(html)
-print(f"wrote docs/index.html with {len(floors)} floor(s)")
+print("wrote docs/index.html")

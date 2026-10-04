@@ -1,6 +1,6 @@
 from config import PDF
 import pymupdf as fitz, numpy as np, cv2, sys, json, math
-from config import FLOORS
+from config import FLOORS, MAT
 SCALE={k:v['scale'] for k,v in FLOORS.items()}
 RES=0.10
 def circ(a,b,c):
@@ -14,12 +14,43 @@ def bez(p,t):
     return tuple((1-t)**3*p[0][k]+3*(1-t)**2*t*p[1][k]+3*(1-t)*t*t*p[2][k]+t**3*p[3][k] for k in (0,1))
 def load(n):
     p=fitz.open(PDF(n))[0]; mpp=0.0254/72*SCALE[n]
-    z=mpp/RES*2; m=p.rotation_matrix
+    z=mpp/RES*2; m=MAT(p,n)
     segs=[]  # (kind, pts, fill, closed)
     arcs=[]
     for d in p.get_drawings():
         c=d.get('color') or d.get('fill') or (0,0,0)
         if c[0]>0.5: continue
+        R=d['rect']*m; PW,PH=p.rect.width,p.rect.height
+        if R.width>0.6*PW or R.height>0.6*PH: continue          # sheet frame
+        if R.x0>0.8*PW and R.y0>0.75*PH: continue               # title block
+        its=d['items']
+        if len(its)>=4 and all(it[0]=='l' for it in its) and 'f' not in d['type']:
+            # polyline door swings (AQ 1000 draws arcs as short lines; double doors put two arcs in one path)
+            chains=[[]]
+            for it in its:
+                a,b=tuple(it[1]*m),tuple(it[2]*m)
+                ch=chains[-1]
+                if ch:
+                    pa,pb=ch[-1]
+                    turn=abs(math.atan2(b[1]-a[1],b[0]-a[0])-math.atan2(pb[1]-pa[1],pb[0]-pa[0]))
+                    turn=min(turn,2*math.pi-turn)
+                    if math.dist(pb,a)>0.05/mpp or turn>0.5: chains.append([]); ch=chains[-1]
+                ch.append((a,b))
+            rest=[]; found=0
+            for ch in chains:
+                ok=False
+                if len(ch)>=4:
+                    pts=[ch[0][0]]+[q[1] for q in ch]
+                    r=circ(pts[0],pts[len(pts)//2],pts[-1])
+                    if r and 0.6<=r[1]*mpp<=1.25 and max(abs(math.dist(q,r[0])-r[1]) for q in pts)<0.06*r[1]:
+                        ang=abs(math.atan2(pts[0][1]-r[0][1],pts[0][0]-r[0][0])-math.atan2(pts[-1][1]-r[0][1],pts[-1][0]-r[0][0]))
+                        ang=min(ang,2*math.pi-ang)
+                        if 1.2<ang<1.8:
+                            arcs.append({'P':[pts[0],pts[0],pts[-1],pts[-1]],'c':r[0],'r':r[1]}); ok=True; found+=1
+                if not ok: rest+=ch
+            if found:
+                for a,b in rest: segs.append(['l',[a,b],d])
+                continue
         for it in d['items']:
             if it[0]=='l': segs.append(['l',[tuple(it[1]*m),tuple(it[2]*m)],d])
             elif it[0]=='c':
@@ -65,8 +96,30 @@ def load(n):
     sh.commit()
     pix=q.get_pixmap(matrix=fitz.Matrix(z,z),colorspace=fitz.csGRAY)
     a=np.frombuffer(pix.samples,np.uint8).reshape(pix.h,pix.w)
-    wall=cv2.resize((a<200).astype(np.uint8),(pix.w//2,pix.h//2),interpolation=cv2.INTER_AREA)>0
+    b=(a<200)[:pix.h//2*2,:pix.w//2*2]
+    wall=b.reshape(pix.h//2,2,pix.w//2,2).any(axis=(1,3))  # max-pool so thin glazing lines survive
     s=z/2
+    # Pick each door's closed end: the wall continues straight on past the hinge in the
+    # closed direction (the door sits in that wall), but not in the open-leaf direction.
+    H_,W_=wall.shape
+    def hits(hx,hy,ex,ey):
+        L=math.hypot(ex-hx,ey-hy) or 1; ux,uy=(ex-hx)/L,(ey-hy)/L; n=0
+        for t in np.arange(0.12,0.6,0.06)/mpp:
+            X,Y=int(round((hx-ux*t)*s)),int(round((hy-uy*t)*s))
+            if 1<=X<W_-1 and 1<=Y<H_-1 and wall[Y-1:Y+2,X-1:X+2].any(): n+=1
+        return n
+    for dd in doors:
+        hx,hy=dd['hinge']; ends=dd['ends']
+        sc=[hits(hx,hy,*e) for e in ends]
+        ce=ends[int(np.argmax(sc))]
+        if max(sc)==0 and dd.get('leaf'): ce=max(ends,key=lambda e:math.dist(e,dd['leaf']))
+        op=max(ends,key=lambda e:math.dist(e,ce))
+        dd['center']=((hx+ce[0])/2,(hy+ce[1])/2); dd['swing']=op
+        # carve the doorway out of the wall raster: plans often draw a thin threshold or
+        # frame line straight across the opening, which would otherwise block the door
+        L=math.dist((hx,hy),ce) or 1; ux,uy=(ce[0]-hx)/L,(ce[1]-hy)/L; t0=0.08/mpp
+        a_=(int(round((hx+ux*t0)*s)),int(round((hy+uy*t0)*s))); b_=(int(round((ce[0]-ux*t0)*s)),int(round((ce[1]-uy*t0)*s)))
+        w8=wall.astype(np.uint8); cv2.line(w8,a_,b_,0,7); wall=w8>0
     D=[{'x':dd['center'][0]*s,'y':dd['center'][1]*s,'hx':dd['hinge'][0]*s,'hy':dd['hinge'][1]*s,'sx':dd['swing'][0]*s,'sy':dd['swing'][1]*s} for dd in doors]
     return wall,D,s,mpp
 if __name__=='__main__':
