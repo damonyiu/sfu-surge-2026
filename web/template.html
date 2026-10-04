@@ -1,0 +1,173 @@
+<title>SFU Hallway Router</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: tool bar on top, full-bleed floor plan canvas below, route readout pinned under the controls */
+:root{
+  --bg:#f3f4f2; --panel:#ffffff; --fg:#1d2321; --muted:#5e6764; --line:#d6dbd8;
+  --accent:#b3262f; --route:#b3262f; --dot:#2f6f8f; --exit:#3d8a4f; --plan-filter:none;
+  --display:"Barlow Condensed","Arial Narrow",sans-serif; --body:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#151a19; --panel:#1e2523; --fg:#e7ece9; --muted:#9aa5a1; --line:#33403c;
+  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --exit:#7fcf8f; --plan-filter:invert(.88) hue-rotate(180deg); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#151a19; --panel:#1e2523; --fg:#e7ece9; --muted:#9aa5a1; --line:#33403c;
+  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --exit:#7fcf8f; --plan-filter:invert(.88) hue-rotate(180deg); color-scheme:dark}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:14px;padding-inline:16px;padding-block:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px}
+h1{font-family:var(--display);font-weight:700;font-size:28px;letter-spacing:.01em;margin:0;text-wrap:balance}
+h1 span{color:var(--accent)}
+.sub{color:var(--muted);font-size:13px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+.tabs{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.tabs button{font:500 13px var(--body);background:var(--panel);color:var(--fg);border:0;padding:8px 12px;cursor:pointer}
+.tabs button+button{border-left:1px solid var(--line)}
+.tabs button[aria-selected="true"]{background:var(--fg);color:var(--bg)}
+label.f{display:flex;flex-direction:column;gap:3px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+select,button.b{font:13px var(--body);background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;max-width:100%}
+select{min-width:0;width:200px}
+button.b{cursor:pointer}
+button:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.readout{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:13px;min-height:20px}
+.readout b{font-family:var(--mono);font-weight:500;font-variant-numeric:tabular-nums}
+.readout .warn{color:var(--accent)}
+.stage{position:relative;flex:1;min-height:360px;border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden;touch-action:none}
+canvas{display:block;width:100%;height:100%;cursor:grab}
+.zoom{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:4px}
+.zoom button{width:32px;height:32px;font:600 16px var(--body);border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;cursor:pointer}
+.legend{position:absolute;left:10px;bottom:10px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:12px;display:flex;gap:12px;flex-wrap:wrap;max-width:calc(100% - 20px)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.note{font-size:12px;color:var(--muted);max-width:75ch}
+</style>
+
+<header>
+  <h1>SFU Hallway Router <span>· prototype</span></h1>
+  <div class="sub">Walls and doors pulled straight from the Facilities key-plan PDFs. Click a door dot to set start, click another for the destination.</div>
+</header>
+
+<div class="bar">
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <label class="f">From<select id="from"></select></label>
+  <label class="f">To<select id="to"></select></label>
+  <button class="b" id="swap" type="button">Swap</button>
+  <button class="b" id="rand" type="button">Random route</button>
+</div>
+<div class="readout" id="readout"></div>
+
+<div class="stage" id="stage">
+  <canvas id="cv"></canvas>
+  <div class="zoom"><button id="zin" type="button" aria-label="Zoom in">+</button><button id="zout" type="button" aria-label="Zoom out">−</button><button id="zfit" type="button" aria-label="Fit plan">⤢</button></div>
+  <div class="legend"><span><i style="background:var(--dot)"></i>door (room # auto-read)</span><span><i style="background:var(--exit)"></i>edge / exit door</span><span><i style="background:var(--route)"></i>route</span></div>
+</div>
+<div class="note">Room numbers come from OCR on the CAD text and some are misread or missing (shown as “Door #”). Paths avoid walls and prefer hallways over cutting through rooms.</div>
+
+<script>
+const FLOORS = __FLOORS__;
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d'), stage=document.getElementById('stage');
+const selFrom=document.getElementById('from'), selTo=document.getElementById('to'), readout=document.getElementById('readout');
+let F, img, grid, view={s:1,x:0,y:0}, from=null, to=null, path=null, anim=null;
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const name=d=>d.label?`Room ${d.label}`:`${d.kind==='exit'?'Exit':'Door'} #${d.id}`;
+
+function decode(b64){const s=atob(b64),a=new Uint8Array(s.length);for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a}
+const tabs=document.getElementById('tabs');
+FLOORS.forEach((f,i)=>{const b=document.createElement('button');b.type='button';b.role='tab';b.textContent=f.name;b.onclick=()=>load(i);tabs.appendChild(b)});
+
+function load(i){
+  F=FLOORS[i]; [...tabs.children].forEach((b,j)=>b.setAttribute('aria-selected',j===i));
+  grid=decode(F.cost); path=null; from=to=null; cancelAnimationFrame(anim);
+  F.dots.sort((a,b)=>(a.label||'~'+String(a.id).padStart(4,'0')).localeCompare(b.label||'~'+String(b.id).padStart(4,'0'),undefined,{numeric:true}));
+  for(const s of [selFrom,selTo]){s.innerHTML='<option value="">Pick a door…</option>'+F.dots.map(d=>`<option value="${d.id}">${name(d)}</option>`).join('')}
+  img=new Image(); img.onload=()=>{fit();randomRoute()}; img.src=F.bg;
+}
+const K=()=>F.bgW/F.w; // bg px per grid cell
+function fit(){const r=stage.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;
+  const s=Math.min(cv.width/F.bgW,cv.height/F.bgH)*.95; view={s,x:(cv.width-F.bgW*s)/2,y:(cv.height-F.bgH*s)/2}; draw()}
+addEventListener('resize',()=>F&&fit());
+
+// ---------- A* on the 0.2 m cost grid ----------
+function nearestOpen(x,y){x=Math.round(x);y=Math.round(y);
+  for(let r=0;r<12;r++)for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const X=x+dx,Y=y+dy;if(X>=0&&Y>=0&&X<F.w&&Y<F.h&&grid[Y*F.w+X])return[X,Y]}return null}
+function astar(a,b){
+  const W=F.w,H=F.h,N=W*H,g=new Float32Array(N).fill(Infinity),par=new Int32Array(N).fill(-1),closed=new Uint8Array(N);
+  const heap=[],push=(f,i)=>{heap.push([f,i]);let k=heap.length-1;while(k){const p=(k-1)>>1;if(heap[p][0]<=heap[k][0])break;[heap[p],heap[k]]=[heap[k],heap[p]];k=p}},
+  pop=()=>{const t=heap[0],l=heap.pop();if(heap.length){heap[0]=l;let k=0;for(;;){const L=2*k+1,R=L+1;let m=k;if(L<heap.length&&heap[L][0]<heap[m][0])m=L;if(R<heap.length&&heap[R][0]<heap[m][0])m=R;if(m===k)break;[heap[m],heap[k]]=[heap[k],heap[m]];k=m}}return t};
+  const s=a[1]*W+a[0],t=b[1]*W+b[0],h=(i)=>Math.hypot(i%W-b[0],(i/W|0)-b[1]);
+  g[s]=0;push(h(s),s);
+  const D=[[1,0,1],[-1,0,1],[0,1,1],[0,-1,1],[1,1,1.414],[1,-1,1.414],[-1,1,1.414],[-1,-1,1.414]];
+  while(heap.length){const[,i]=pop();if(closed[i])continue;closed[i]=1;if(i===t)break;const x=i%W,y=i/W|0;
+    for(const[dx,dy,c]of D){const X=x+dx,Y=y+dy;if(X<0||Y<0||X>=W||Y>=H)continue;const j=Y*W+X;if(!grid[j]||closed[j])continue;
+      if(dx&&dy&&(!grid[y*W+X]||!grid[Y*W+x]))continue;
+      const ng=g[i]+c*(grid[i]+grid[j])/2;if(ng<g[j]){g[j]=ng;par[j]=i;push(ng+h(j),j)}}}
+  if(par[t]<0&&s!==t)return null;
+  const out=[];for(let i=t;i>=0;i=par[i])out.push([i%W,i/W|0]);out.reverse();
+  // real walking length
+  let len=0;for(let k=1;k<out.length;k++)len+=Math.hypot(out[k][0]-out[k-1][0],out[k][1]-out[k-1][1]);
+  return{pts:smooth(out),len:len*F.res}
+}
+function smooth(p){if(p.length<3)return p;let q=p.filter((_,i)=>i%3===0||i===p.length-1);
+  for(let it=0;it<2;it++){const r=[q[0]];for(let i=0;i<q.length-1;i++){const[a,b]=[q[i],q[i+1]];r.push([.75*a[0]+.25*b[0],.75*a[1]+.25*b[1]],[.25*a[0]+.75*b[0],.25*a[1]+.75*b[1]])}r.push(q[q.length-1]);q=r}return q}
+
+function route(){
+  cancelAnimationFrame(anim); path=null;
+  selFrom.value=from?from.id:''; selTo.value=to?to.id:'';
+  if(!from||!to){readout.innerHTML=from?`Start: <b>${name(from)}</b> — now pick a destination`:'Pick a start door';draw();return}
+  const a=nearestOpen(from.x,from.y),b=nearestOpen(to.x,to.y);
+  const t0=performance.now();const r=a&&b&&astar(a,b);const ms=performance.now()-t0;
+  if(!r){readout.innerHTML=`<span class="warn">No path found between ${name(from)} and ${name(to)}. One of them is probably in a pocket the wall extraction sealed off.</span>`;draw();return}
+  path=r.pts;
+  readout.innerHTML=`<span>${name(from)} → ${name(to)}</span><span>Walk <b>${Math.round(r.len)} m</b></span><span>About <b>${Math.max(1,Math.round(r.len/1.3/60*10)/10)} min</b></span><span style="color:var(--muted)">solved in <b>${ms.toFixed(0)} ms</b></span>`;
+  // raccoon walk
+  const segs=[0];for(let i=1;i<path.length;i++)segs.push(segs[i-1]+Math.hypot(path[i][0]-path[i-1][0],path[i][1]-path[i-1][1]));
+  const total=segs[segs.length-1],start=performance.now(),dur=Math.min(9000,Math.max(2500,total*25));
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const step=now=>{const u=reduce?1:Math.min(1,(now-start)/dur),d=u*total;let i=1;while(i<segs.length-1&&segs[i]<d)i++;
+    const f=(d-segs[i-1])/((segs[i]-segs[i-1])||1),p=[path[i-1][0]+(path[i][0]-path[i-1][0])*f,path[i-1][1]+(path[i][1]-path[i-1][1])*f];
+    draw(p,d,path[i][0]<path[i-1][0]);if(u<1)anim=requestAnimationFrame(step)};
+  anim=requestAnimationFrame(step);
+}
+
+function draw(rac,walked,faceLeft){
+  ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.setTransform(view.s,0,0,view.s,view.x,view.y);
+  ctx.filter=css('--plan-filter')||'none';ctx.drawImage(img,0,0);ctx.filter='none';
+  const k=K(),px=v=>v*k,dpr=devicePixelRatio,u=1/view.s*dpr;
+  if(path){ctx.lineJoin=ctx.lineCap='round';ctx.strokeStyle=css('--route');ctx.globalAlpha=.25;ctx.lineWidth=7*u;
+    ctx.beginPath();path.forEach((p,i)=>i?ctx.lineTo(px(p[0]),px(p[1])):ctx.moveTo(px(p[0]),px(p[1])));ctx.stroke();ctx.globalAlpha=1;
+    if(rac){ctx.lineWidth=4*u;ctx.beginPath();let d=0;ctx.moveTo(px(path[0][0]),px(path[0][1]));
+      for(let i=1;i<path.length;i++){d+=Math.hypot(path[i][0]-path[i-1][0],path[i][1]-path[i-1][1]);if(d>walked){ctx.lineTo(px(rac[0]),px(rac[1]));break}ctx.lineTo(px(path[i][0]),px(path[i][1]))}ctx.stroke()}}
+  for(const d of F.dots){const sel=d===from||d===to;ctx.fillStyle=sel?css('--route'):d.kind==='exit'?css('--exit'):css('--dot');
+    ctx.beginPath();ctx.arc(px(d.x),px(d.y),(sel?7:4.2)*u,0,7);ctx.fill();
+    if(sel){ctx.fillStyle=css('--fg');ctx.font=`600 ${12*u}px ${css('--body')}`;ctx.fillText(name(d),px(d.x)+9*u,px(d.y)-9*u)}}
+  if(rac){ctx.save();ctx.translate(px(rac[0]),px(rac[1]));if(!faceLeft)ctx.scale(-1,1);ctx.font=`${26*u}px serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('🦝',0,-8*u);ctx.restore()}
+}
+
+// ---------- interaction ----------
+let drag=null,moved=false;
+const toPlan=(e)=>{const r=cv.getBoundingClientRect(),X=(e.clientX-r.left)*devicePixelRatio,Y=(e.clientY-r.top)*devicePixelRatio;return[(X-view.x)/view.s,(Y-view.y)/view.s,X,Y]};
+cv.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY,view.x,view.y];moved=false;cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag[0],dy=e.clientY-drag[1];if(Math.hypot(dx,dy)>4)moved=true;if(moved){view.x=drag[2]+dx*devicePixelRatio;view.y=drag[3]+dy*devicePixelRatio;draw()}});
+cv.addEventListener('pointerup',e=>{const was=drag;drag=null;if(moved||!was)return;
+  const[x,y]=toPlan(e),k=K();let best=null,bd=14*devicePixelRatio/view.s;
+  for(const d of F.dots){const dd=Math.hypot(d.x*k-x,d.y*k-y);if(dd<bd){bd=dd;best=d}}
+  if(!best)return; if(!from||(from&&to)){from=best;to=null}else if(best!==from){to=best} route()});
+cv.addEventListener('wheel',e=>{e.preventDefault();zoomAt(e.deltaY<0?1.15:1/1.15,...toPlan(e).slice(2))},{passive:false});
+function zoomAt(f,X,Y){view.x=X-(X-view.x)*f;view.y=Y-(Y-view.y)*f;view.s*=f;draw()}
+document.getElementById('zin').onclick=()=>zoomAt(1.3,cv.width/2,cv.height/2);
+document.getElementById('zout').onclick=()=>zoomAt(1/1.3,cv.width/2,cv.height/2);
+document.getElementById('zfit').onclick=fit;
+selFrom.onchange=()=>{from=F.dots.find(d=>d.id==selFrom.value)||null;route()};
+selTo.onchange=()=>{to=F.dots.find(d=>d.id==selTo.value)||null;route()};
+document.getElementById('swap').onclick=()=>{[from,to]=[to,from];route()};
+function labelComps(){const W=F.w,H=F.h,c=new Int32Array(W*H);let n=0;const q=new Int32Array(W*H);
+  for(let s=0;s<W*H;s++){if(!grid[s]||c[s])continue;n++;let h=0,t=0;q[t++]=s;c[s]=n;
+    while(h<t){const i=q[h++],x=i%W,y=i/W|0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const X=x+dx,Y=y+dy;if(X<0||Y<0||X>=W||Y>=H)continue;const j=Y*W+X;if(grid[j]&&!c[j]){c[j]=n;q[t++]=j}}}}
+  const cnt={};for(const d of F.dots){const p=nearestOpen(d.x,d.y);d.comp=p?c[p[1]*W+p[0]]:0;cnt[d.comp]=(cnt[d.comp]||0)+1}
+  F.main=+Object.keys(cnt).filter(k=>k!=='0').sort((a,b)=>cnt[b]-cnt[a])[0]}
+function randomRoute(){if(F.main===undefined)labelComps();const L=F.dots.filter(d=>d.label&&d.comp===F.main);const pick=a=>a[Math.random()*a.length|0];
+  for(let t=0;t<20;t++){from=pick(L);to=pick(L);if(from!==to&&Math.hypot(from.x-to.x,from.y-to.y)>F.w/4)break}route()}
+document.getElementById('rand').onclick=randomRoute;
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>draw());
+load(0);
+</script>
