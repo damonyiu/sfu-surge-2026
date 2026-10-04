@@ -94,7 +94,7 @@ const $=id=>document.getElementById(id);
 const cv=$('cv'), ctx=cv.getContext('2d'), stage=$('stage');
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 let cur=0, view={s:1,x:0,y:0}, from=null, to=null, plan=null, anim=null, rac=null;
-const name=d=>d.label?`${d.label}`:`Door #${d.id}`;
+const name=d=>d.label?d.label.replace(/ door \d+$/,''):`Door #${d.id}`;
 const fullName=d=>`${name(d)} · ${FLOORS[d.f].name.replace(' level','')}`;
 
 // ---------- load floors (grids are gzipped) ----------
@@ -133,38 +133,74 @@ function snap(F,x,y){x=Math.round(x);y=Math.round(y);
   for(let r=0;r<10;r++)for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const X=x+dx,Y=y+dy;
     if(X>=0&&Y>=0&&X<F.w&&Y<F.h&&F.type[Y*F.w+X])return Y*F.w+X}
   return -1}
-function dijkstra(F,src,targets){
+// sources/targets are arrays of cell indexes; stopFirst ends at the first target reached (closest)
+function dijkstra(F,srcs,targets,stopFirst){
   const W=F.w,N=W*F.h,g=new Float32Array(N).fill(Infinity),par=new Int32Array(N).fill(-1),done=new Uint8Array(N);
-  let left=new Set(targets);
+  const left=new Set(targets);let hit=-1;
   const hk=[],hv=[];const push=(k,v)=>{hk.push(k);hv.push(v);let i=hk.length-1;while(i){const p=(i-1)>>1;if(hk[p]<=hk[i])break;[hk[p],hk[i]]=[hk[i],hk[p]];[hv[p],hv[i]]=[hv[i],hv[p]];i=p}};
-  const pop=()=>{const v=hv[0],k=hk[0],lk=hk.pop(),lv=hv.pop();if(hk.length){hk[0]=lk;hv[0]=lv;let i=0;for(;;){const l=2*i+1,r=l+1;let m=i;if(l<hk.length&&hk[l]<hk[m])m=l;if(r<hk.length&&hk[r]<hk[m])m=r;if(m===i)break;[hk[m],hk[i]]=[hk[i],hk[m]];[hv[m],hv[i]]=[hv[i],hv[m]];i=m}}return v};
-  const D=[[1,0,1],[-1,0,1],[0,1,1],[0,-1,1],[1,1,1.414],[1,-1,1.414],[-1,1,1.414],[-1,-1,1.414]];
-  g[src]=0;push(0,src);
-  while(hk.length&&left.size){const i=pop();if(done[i])continue;done[i]=1;left.delete(i);const x=i%W,y=i/W|0;
+  const pop=()=>{const v=hv[0],lk=hk.pop(),lv=hv.pop();if(hk.length){hk[0]=lk;hv[0]=lv;let i=0;for(;;){const l=2*i+1,r=l+1;let m=i;if(l<hk.length&&hk[l]<hk[m])m=l;if(r<hk.length&&hk[r]<hk[m])m=r;if(m===i)break;[hk[m],hk[i]]=[hk[i],hk[m]];[hv[m],hv[i]]=[hv[i],hv[m]];i=m}}return v};
+  const D=[[1,0,1],[-1,0,1],[0,1,1],[0,-1,1],[1,1,Math.SQRT2],[1,-1,Math.SQRT2],[-1,1,Math.SQRT2],[-1,-1,Math.SQRT2]];
+  for(const s of srcs){g[s]=0;push(0,s)}
+  while(hk.length&&left.size){const i=pop();if(done[i])continue;done[i]=1;
+    if(left.has(i)){left.delete(i);if(stopFirst){hit=i;break}}
+    const x=i%W,y=i/W|0;
     for(const[dx,dy,c]of D){const X=x+dx,Y=y+dy;if(X<0||Y<0||X>=W||Y>=F.h)continue;const j=Y*W+X;if(!F.type[j]||done[j])continue;
       if(dx&&dy&&(!F.type[y*W+X]||!F.type[Y*W+x]))continue;
       const ng=g[i]+c*(F.cost[i]+F.cost[j])/2;if(ng<g[j]){g[j]=ng;par[j]=i;push(ng,j)}}}
-  return{g,par}}
+  return{g,par,hit}}
+
+// line of sight between two cells: every cell on the segment is open, no room interiors unless
+// the grid path already went through one, and not hugging walls more than the grid path did
+function clear(F,a,b,maxCost,roomOK){const n=Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])*2)||1;
+  for(let k=0;k<=n;k++){const x=Math.round(a[0]+(b[0]-a[0])*k/n),y=Math.round(a[1]+(b[1]-a[1])*k/n),j=y*F.w+x,t=F.type[j];
+    if(!t||(t===2&&!roomOK)||F.cost[j]>maxCost)return false}return true}
+// string-pulling: replace the staircase grid path with the fewest straight segments that stay clear.
+// This gives the real (any-angle) shortest walk along the chosen corridors, and its true length.
+function pull(F,P){if(P.length<3)return P;const out=[P[0]];let i=0;
+  const cAt=p=>F.cost[p[1]*F.w+p[0]],rAt=p=>F.type[p[1]*F.w+p[0]]===2;
+  while(i<P.length-1){let best=i+1,mc=cAt(P[i]),room=rAt(P[i]);
+    for(let j=i+1;j<P.length;j++){mc=Math.max(mc,cAt(P[j]));room=room||rAt(P[j]);
+      if(clear(F,P[i],P[j],Math.max(mc,3),room))best=j;else if(j-best>40)break}
+    out.push(P[best]);i=best}
+  return out}
+function polyLen(P){let L=0;for(let k=1;k<P.length;k++)L+=Math.hypot(P[k][0]-P[k-1][0],P[k][1]-P[k-1][1]);return L}
+function round(P){if(P.length<3)return P;const r=[P[0]];   // soften corners for drawing only
+  for(let i=1;i<P.length-1;i++){const[a,b,c]=[P[i-1],P[i],P[i+1]],da=Math.hypot(b[0]-a[0],b[1]-a[1]),dc=Math.hypot(c[0]-b[0],c[1]-b[1]),s=Math.min(4,da/2,dc/2);
+    r.push([b[0]+(a[0]-b[0])*s/da,b[1]+(a[1]-b[1])*s/da],[b[0]+(c[0]-b[0])*s/dc,b[1]+(c[1]-b[1])*s/dc])}
+  r.push(P[P.length-1]);return r}
 function trace(F,par,t){const out=[];for(let i=t;i>=0;i=par[i])out.push([i%F.w,i/F.w|0]);out.reverse();
-  let len=0;for(let k=1;k<out.length;k++)len+=Math.hypot(out[k][0]-out[k-1][0],out[k][1]-out[k-1][1]);return{pts:smooth(out),len:len*F.res}}
-function smooth(p){if(p.length<3)return p;let q=p.filter((_,i)=>i%3===0||i===p.length-1);
-  for(let it=0;it<2;it++){const r=[q[0]];for(let i=0;i<q.length-1;i++){const[a,b]=[q[i],q[i+1]];r.push([.75*a[0]+.25*b[0],.75*a[1]+.25*b[1]],[.25*a[0]+.75*b[0],.25*a[1]+.75*b[1]])}r.push(q[q.length-1]);q=r}return q}
+  const P=pull(F,out);return{pts:round(P),len:polyLen(P)*F.res,start:out[0][1]*F.w+out[0][0]}}
+
+// every door of the same room, on the same floor (a room with two doors: use whichever is closer)
+const base=d=>d.label.replace(/ door \d+$/,'');
+function doorsOf(d){if(!d.label)return[d];const F=FLOORS[d.f];return F.dots.filter(e=>e.label&&base(e)===base(d)&&e.comp===d.comp)}
+function cellsOf(F,ds){const m=new Map();for(const d of ds){const c=snap(F,d.x,d.y);if(c>=0)m.set(c,d)}return m}
+
+// timing: indoor walking ~1.25 m/s; an elevator trip = average wait + doors + ride (AQ floor to floor ~4.3 m at ~1 m/s)
+const WALK=1.25,LIFT_WAIT=40,LIFT_DOORS=15,LIFT_PER_FLOOR=5;
+const liftSecs=n=>LIFT_WAIT+LIFT_DOORS+LIFT_PER_FLOOR*n;
 
 function solve(){
   if(!from||!to)return null;
   const A=FLOORS[from.f],B=FLOORS[to.f];
-  const s=snap(A,from.x,from.y),t=snap(B,to.x,to.y);if(s<0||t<0)return{err:'One of those doors is outside the mapped area.'};
-  if(from.f===to.f){const r=dijkstra(A,s,[t]);if(!isFinite(r.g[t]))return{err:'No hallway route between these doors on this level. One of them is probably in a section the plan reader sealed off.'};
-    return{legs:[{f:from.f,...trace(A,r.par,t)}]}}
-  // different floors: walk to an elevator that serves both, ride, walk from it
-  const both=A.lifts.filter(l=>B.lifts.some(m=>m.id===l.id));
+  const S=cellsOf(A,doorsOf(from)),T=cellsOf(B,doorsOf(to));
+  if(!S.size||!T.size)return{err:'One of those doors is outside the mapped area.'};
+  if(from.f===to.f){const r=dijkstra(A,[...S.keys()],[...T.keys()],true);
+    if(r.hit<0)return{err:'No hallway route between these doors on this level. One of them is probably in a section the plan reader sealed off.'};
+    const L=trace(A,r.par,r.hit);return{legs:[{f:from.f,...L}],a:S.get(L.start),b:T.get(r.hit)}}
+  // different floors: walk to an elevator that serves both, ride, walk from it.
+  // Pick the elevator with the least total time, counting the walk on both floors.
+  const both=A.lifts.filter(l=>l.comp===A.main&&B.lifts.some(m=>m.id===l.id&&m.comp===B.main));
   if(!both.length)return{err:`No elevator found that stops at both ${A.name} and ${B.name}.`};
   const ta=both.map(l=>l.sy*A.w+l.sx),tb=both.map(l=>{const m=B.lifts.find(m=>m.id===l.id);return m.sy*B.w+m.sx});
-  const ra=dijkstra(A,s,ta),rb=dijkstra(B,t,tb);
-  let best=-1,bc=Infinity;both.forEach((l,k)=>{const c=ra.g[ta[k]]+rb.g[tb[k]];if(c<bc){bc=c;best=k}});
-  if(!isFinite(bc))return{err:'Could not reach a shared elevator from one of these doors.'};
-  const l1=trace(A,ra.par,ta[best]);const l2=trace(B,rb.par,tb[best]);l2.pts.reverse();
-  return{legs:[{f:from.f,...l1},{f:to.f,...l2}],lift:both[best].id}
+  const ra=dijkstra(A,[...S.keys()],ta,false),rb=dijkstra(B,[...T.keys()],tb,false);
+  // compare the real walking length (after straightening) of the corridor route to each elevator
+  let best=-1,bc=Infinity,l1,l2;
+  both.forEach((l,k)=>{if(!isFinite(ra.g[ta[k]])||!isFinite(rb.g[tb[k]]))return;
+    const x=trace(A,ra.par,ta[k]),y=trace(B,rb.par,tb[k]);if(x.len+y.len<bc){bc=x.len+y.len;best=k;l1=x;l2=y}});
+  if(best<0)return{err:'Could not reach a shared elevator from one of these doors.'};
+  const end=l2.start;l2.pts.reverse();
+  return{legs:[{f:from.f,...l1},{f:to.f,...l2}],lift:both[best].id,a:S.get(l1.start),b:T.get(end)}
 }
 
 function go(){
@@ -173,16 +209,20 @@ function go(){
   [...$('floors').children].forEach(b=>b.classList.remove('onroute'));
   if(!plan){sum.innerHTML='<h2>Pick two rooms</h2>';st.innerHTML='';draw();return}
   if(plan.err){sum.innerHTML=`<h2>No route</h2><div class="warn">${plan.err}</div>`;st.innerHTML='';draw();return}
+  if(plan.a)from=plan.a;if(plan.b)to=plan.b;   // the door actually used, if the room has more than one
   plan.legs.forEach(L=>$('floors').children[L.f].classList.add('onroute'));
-  const len=plan.legs.reduce((a,L)=>a+L.len,0), mins=len/1.3/60+(plan.lift?0.75:0);
-  sum.innerHTML=`<h2>${fullName(from)} → ${fullName(to)}</h2><div class="stats"><div><b>${Math.round(len)} m</b><span>walking</span></div><div><b>${Math.max(1,Math.round(mins*10)/10)} min</b><span>about</span></div>${plan.lift?`<div><b>${plan.lift}</b><span>elevator</span></div>`:''}</div>`;
+  const walkM=plan.legs.reduce((a,L)=>a+L.len,0),walkS=walkM/WALK;
+  const dF=Math.abs(FLOORS[to.f].level-FLOORS[from.f].level),liftS=plan.lift?liftSecs(dF):0,tot=walkS+liftS;
+  const fmt=s=>s<60?`${Math.max(5,Math.round(s/5)*5)} s`:`${(s/60).toFixed(1)} min`;
+  sum.innerHTML=`<h2>${fullName(from)} → ${fullName(to)}</h2><div class="stats"><div><b>${fmt(tot)}</b><span>about</span></div><div><b>${Math.round(walkM)} m</b><span>walking</span></div>${plan.lift?`<div><b>${plan.lift}</b><span>elevator</span></div>`:''}</div>
+    <p class="note" style="margin:8px 0 0">${plan.lift?`Walking ${fmt(walkS)} at an easy indoor pace, plus about ${fmt(liftS)} for the elevator: ${LIFT_WAIT} s average wait, doors, and ${dF} floor${dF>1?'s':''} of travel. A busy elevator between classes can add a minute or two.`:`Walking at an easy indoor pace (${WALK} m/s).`}</p>`;
   const s=[`Start at ${name(from)} on ${FLOORS[from.f].name}.`];
   if(plan.lift){s.push(`Walk ${Math.round(plan.legs[0].len)} m to elevator ${plan.lift}.`);
-    s.push(`<li class="lift">Take elevator ${plan.lift} ${FLOORS[to.f].level>FLOORS[from.f].level?'up':'down'} to ${FLOORS[to.f].name}.</li>`);
+    s.push(`<li class="lift">Take elevator ${plan.lift} ${FLOORS[to.f].level>FLOORS[from.f].level?'up':'down'} ${dF} floor${dF>1?'s':''} to ${FLOORS[to.f].name}.</li>`);
     s.push(`Walk ${Math.round(plan.legs[1].len)} m to ${name(to)}.`)}
   else s.push(`Walk ${Math.round(plan.legs[0].len)} m to ${name(to)}.`);
   s.push(`You’ve arrived at ${name(to)}. 🦝`);
-  st.innerHTML=s.map(x=>x.startsWith('<li')?x:`<li>${x}</li>`).join('');
+  st.innerHTML=s.map(x=>x.startsWith('<li')?x:`<li>${x}</li>`).join('');setInputs();
   walk(0);
 }
 // raccoon walks each leg; between legs it rides the elevator and the view switches floor
@@ -227,15 +267,21 @@ function draw(){
 // ---------- input ----------
 function find(q){q=q.trim().toUpperCase().replace(/^AQ\s*/,'');if(!q)return null;
   for(const F of FLOORS)for(const d of F.dots)if(d.label.toUpperCase()===q)return d;
-  for(const F of FLOORS)for(const d of F.dots)if(d.label.toUpperCase().startsWith(q))return d;
+  if(FLOORS.some(F=>(F.nodoor||[]).includes(q)))return null;   // known room, no door: say so instead of guessing
+  for(const F of FLOORS)for(const d of F.dots)if(base(d).toUpperCase()===q)return d;
+  const pre=[];for(const F of FLOORS)for(const d of F.dots)if(d.label.toUpperCase().startsWith(q))pre.push(d);
+  if(new Set(pre.map(base)).size===1)return pre[0];
   const m=q.match(/^DOOR\s*#?(\d+)$/);if(m){const F=FLOORS[cur];return F.dots.find(d=>d.id==m[1])||null}
   return null}
 $('go').onclick=()=>{const a=find($('from').value),b=find($('to').value);
-  if(!a||!b){$('summary').innerHTML=`<h2>Room not found</h2><div class="warn">Couldn’t find ${!a?`“${$('from').value}”`:`“${$('to').value}”`}. Try a number from the suggestions, or click a door on the plan.</div>`;return}
+  if(!a||!b){const q=(!a?$('from').value:$('to').value).trim().toUpperCase().replace(/^AQ\s*/,'');
+    const nd=FLOORS.find(F=>(F.nodoor||[]).includes(q));
+    $('summary').innerHTML=nd?`<h2>${q} isn’t linked to a door yet</h2><div class="warn">${q} is on the ${nd.name} plan, but the map hasn’t matched a door to it (its entrance may be drawn as a plain opening). Click a door next to it on the plan instead, or add an opening with Fix map.</div>`
+      :`<h2>Room not found</h2><div class="warn">Couldn’t find “${q}”. Try a number from the suggestions, or click a door on the plan.</div>`;return}
   from=a;to=b;go()};
 for(const id of['from','to'])$(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('go').click()});
 $('swap').onclick=()=>{[from,to]=[to,from];[$('from').value,$('to').value]=[$('to').value,$('from').value];go()};
-function setInputs(){$('from').value=from?(from.label||`Door #${from.id}`):'';$('to').value=to?(to.label||`Door #${to.id}`):''}
+function setInputs(){$('from').value=from?name(from):'';$('to').value=to?name(to):''}
 function demo(){
   const pool=lv=>{const F=FLOORS.find(F=>F.level===lv);return F.dots.filter(d=>d.label&&d.kind==='room'&&d.comp===F.main)};
   const A=pool(3),B=pool(2);let tries=0;

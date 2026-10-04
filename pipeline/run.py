@@ -25,9 +25,7 @@ for n in ids:
     step("grid.py", n)    # walls + door swings from the CAD vectors
     step("walk.py", n)    # walkable area, rooms split from hallways, manual fixes applied
     step("doors.py", n)   # which two spaces each door connects
-    step("ocr.py", n)     # room numbers, one region at a time (slowest step)
-    if n == "aq3" and os.path.exists(os.path.join(ROOT, "data", "aq3_sheet_ocr.json")):
-        step("merge_labels.py", n, os.path.join(ROOT, "data", "aq3_sheet_ocr.json"))
+    step("labels.py", n)  # room numbers from the CAD room-number layer, by character shape
 
 step("cores.py")          # elevator shafts on every floor
 step("build.py")          # shared crop, routing grids, doors, elevators -> build/floors.json

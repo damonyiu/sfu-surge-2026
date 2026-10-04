@@ -28,9 +28,15 @@ bid=cands[0][2]; sl=cands[0][3]
 keep=(lab==bid)
 wall=wall*keep
 # exterior
-sealed=cv2.morphologyEx(wall,cv2.MORPH_CLOSE,el(15))
+# outside vs inside: walls plus the building's gross-area outline, so open entrances don't let 'outside' leak in
+_ol=np.load(n+'_outline.npy').astype(np.uint8) if _os.path.exists(n+'_outline.npy') else np.zeros_like(wall)
+sealed=cv2.morphologyEx(np.maximum(wall,_ol),cv2.MORPH_CLOSE,el(15 if _ol.any() else 32))   # no outline (AQ 1000): close gaps up to ~6 m
 ext=np.ones_like(wall,bool); ext[sealed>0]=False
 el2,_=ndi.label(ext); ext=el2==el2[0,0]
+# anything inside the filled gross-area outline is inside the building, even next to an open entrance
+if _ol.any():
+    _ins=ndi.binary_fill_holes(cv2.morphologyEx(_ol,cv2.MORPH_CLOSE,el(4))>0)
+    ext&=~cv2.dilate(_ins.astype(np.uint8),el(6)).astype(bool)
 free=(cv2.dilate(wall,el(1))==0)&~ext
 # door-sealed walls
 import json

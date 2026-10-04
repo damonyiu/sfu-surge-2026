@@ -1,6 +1,6 @@
 from config import PDF
 import pymupdf as fitz, numpy as np, cv2, sys, json, math
-from config import FLOORS, MAT
+from config import FLOORS, MAT, WALL_LAYERS, layer, PDF
 SCALE={k:v['scale'] for k,v in FLOORS.items()}
 RES=0.10
 def circ(a,b,c):
@@ -18,6 +18,7 @@ def load(n):
     segs=[]  # (kind, pts, fill, closed)
     arcs=[]
     for d in p.get_drawings():
+        if layer(d) not in WALL_LAYERS: continue
         c=d.get('color') or d.get('fill') or (0,0,0)
         if c[0]>0.5: continue
         R=d['rect']*m; PW,PH=p.rect.width,p.rect.height
@@ -124,5 +125,13 @@ def load(n):
     return wall,D,s,mpp
 if __name__=='__main__':
     n=sys.argv[1]; wall,D,s,mpp=load(n)
+    # building outline (the gross-area polygon): used only to tell inside from outside, never as a wall
+    p_=fitz.open(PDF(n))[0]; m_=MAT(p_,n); ol=np.zeros(wall.shape,np.uint8)
+    for d in p_.get_drawings():
+        if layer(d)!='GROS': continue
+        for it in d['items']:
+            if it[0]=='l':
+                a_,b_=it[1]*m_,it[2]*m_; cv2.line(ol,(int(a_.x*s),int(a_.y*s)),(int(b_.x*s),int(b_.y*s)),1,2)
+    np.save(n+'_outline.npy',ol>0)
     np.save(n+'_wall.npy',wall); json.dump({'doors':D,'px_per_pt':s,'m_per_pt':mpp},open(n+'_meta.json','w'))
     print(n,wall.shape,'door arcs',len(D))

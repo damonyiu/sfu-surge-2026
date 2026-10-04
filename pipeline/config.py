@@ -27,3 +27,10 @@ def CLIP(rect, n):
     """a rect in aligned coordinates -> the same area on this sheet"""
     dx, dy = OFF(n)
     return _fitz.Rect(rect.x0 - dx, rect.y0 - dy, rect.x1 - dx, rect.y1 - dy)
+
+# CAD layers (the part after "|", the prefix differs per floor). Walls are built only from these,
+# so furniture, the gross-area outline, grid lines and room-number text don't block anything.
+WALL_LAYERS = {"AWA", "AWAFU", "AGL", "AWACO", "AWAMO", "ADO", "AFLST"}
+TEXT_LAYER = "RM$TXT"
+def layer(d):
+    return (d.get("layer") or "").split("|")[-1]

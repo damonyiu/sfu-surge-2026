@@ -53,15 +53,26 @@ for n in ids:
     # regions with no door at all are not walkable (open-to-below courtyard, shafts, closets)
     # room labels: one per region
     # map each label to the region under it now (walk.py may have been re-run since OCR)
-    rlabel = {}
+    rlabel = {}; rpos = {}
     for L in labels:
         yy_, xx_ = int(L["y"]), int(L["x"])
         win = lab[max(yy_ - 5, 0):yy_ + 6, max(xx_ - 5, 0):xx_ + 6]; v = win[win > 0]
-        if v.size: rlabel.setdefault(int(np.bincount(v).argmax()), L["t"])
+        if v.size:
+            c_ = int(np.bincount(v).argmax())
+            if c_ not in rlabel: rlabel[c_] = L["t"]; rpos[c_] = (L["x"], L["y"])
     # hallway = region labelled with a 3-digit corridor number (AQ corridors are 300, 301, ...),
     # a region with 5+ doors, or an unlabelled region with 3+ doors. Anything with a 4-digit room number is a room.
+    objs_ = ndi.find_objects(lab)
+    def elongated(c):
+        sl = objs_[c - 1]
+        if sl is None: return False
+        h_, w_ = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        fill = (lab[sl] == c).sum() / max(h_ * w_, 1)
+        return max(h_, w_) / max(min(h_, w_), 1) > 3 or fill < 0.45
     def is_hall(c):
-        if deg.get(c, 0) >= 5: return True          # 5+ doors: a corridor even if a room number bled in
+        # 5+ doors and long/thin or ragged: a corridor even if a room number sits in it.
+        # A compact space with many doors and a room number is a lecture hall or classroom.
+        if deg.get(c, 0) >= 5 and (not rlabel.get(c) or elongated(c)): return True
         t = rlabel.get(c)
         if t: return len(re.match(r"\d+", t).group(0)) == 3
         return deg.get(c, 0) >= 3
@@ -90,7 +101,7 @@ for n in ids:
     typ[~np.isin(lab3, good)] = 0
 
     dist = ndi.distance_transform_edt(typ > 0)
-    cost = 1 + np.clip(3.5 - dist, 0, 3.5) * 2          # 1 in the middle, up to 8 by a wall
+    cost = 1 + np.clip(2.5 - dist, 0, 2.5) * 0.8        # 1 in the middle, up to 3 right by a wall
     cost[typ == 2] *= 6                                   # rooms: only if there's no other way
     cost = np.clip(np.round(cost), 1, 63).astype(np.uint8)
     packed = np.where(typ > 0, typ * 64 + cost, 0).astype(np.uint8)
@@ -102,10 +113,25 @@ for n in ids:
         if not (0 <= x < W and 0 <= y < H): continue
         a, b = o["a"], o["b"]
         if not (a in has_door or b in has_door): continue
-        room = next((c for c in (a, b) if c and not is_hall(c)), None)
+        # toilet stalls: a tiny dead-end space whose door opens off a room (the washroom), not a hallway
+        if a and b and any(area[c] < 2.0 and deg.get(c, 0) <= 1 and not is_hall(o_) for c, o_ in ((a, b), (b, a))): continue
+        # which room does this door belong to? A door between a passage-like room (a lobby or
+        # a suite's inner corridor, several doors) and a small room belongs to the small room.
+        # If both sides have the same number of doors, use the side the door swings into.
+        cand = [c for c in (a, b) if c and not is_hall(c)]
+        if len(cand) == 2:
+            da, db = deg.get(cand[0], 0), deg.get(cand[1], 0)
+            room = cand[0] if da < db else cand[1] if db < da else (o.get("swing_into") if o.get("swing_into") in cand else cand[0])
+        else:
+            room = cand[0] if cand else None
         kind = "exit" if bool(a) != bool(b) else ("hall" if room is None else "room")
         dots.append({"id": i, "x": round(x, 1), "y": round(y, 1),
-                     "label": rlabel.get(room, "") if room else "", "kind": kind})
+                     "label": rlabel.get(room, "") if room else "", "kind": kind,
+                     "lx": round((rpos[room][0] - X0) / F, 1) if room in rpos else None,
+                     "ly": round((rpos[room][1] - Y0) / F, 1) if room in rpos else None})
+    # room numbers that are on the plan but have no usable door (so search can say why)
+    have_lbl = {re.sub(r" door \d+$", "", dt["label"]) for dt in dots if dt["label"]}
+    nodoor = sorted({L["t"] for L in labels if len(re.match(r"\d+", L["t"]).group(0)) == 4} - have_lbl)
     seen = {}
     for dt in dots:
         if dt["label"]:
@@ -147,7 +173,7 @@ for n in ids:
         "grid": base64.b64encode(gzip.compress(packed.tobytes(), 9)).decode(),
         "bg": "data:image/png;base64," + base64.b64encode(png).decode(),
         "bgW": int(img.shape[1]), "bgH": int(img.shape[0]),
-        "dots": dots, "lifts": lifts, "origin": [int(X0), int(Y0)], "pxPerPt": S})
+        "dots": dots, "nodoor": nodoor, "lifts": lifts, "origin": [int(X0), int(Y0)], "pxPerPt": S})
     print(n, "cells", W, H, "doors", len(dots), "labelled", sum(1 for x in dots if x["label"]),
           "lifts", len(lifts), "hall%", round((typ == 1).mean() * 100, 1))
 
