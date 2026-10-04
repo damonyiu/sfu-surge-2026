@@ -4,15 +4,18 @@
 /* Layout: control strip, then plan canvas beside a step list (stacks under the plan on phones) */
 :root{
   --bg:#f2f3f1; --panel:#ffffff; --fg:#1c2220; --muted:#5d6663; --line:#d5dad7;
-  --accent:#b3262f; --route:#b3262f; --dot:#2f6f8f; --lift:#7a4fb3; --plan-filter:none;
+  --accent:#b3262f; --route:#b3262f; --dot:#2f6f8f; --lift:#7a4fb3;
+  --p-wall:#1f2523; --p-glass:#5b8fa8; --p-door:#4a524f; --p-detail:#9aa29e; --p-text:#3b4340; --p-grid:#e3e6e4; --p-stair:#6e7672;
   --display:"Barlow Condensed","Arial Narrow",sans-serif; --body:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#141918; --panel:#1d2422; --fg:#e6ebe8; --muted:#9aa5a1; --line:#33403c;
-  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --lift:#b892ef; --plan-filter:invert(.88) hue-rotate(180deg); color-scheme:dark}}
+  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --lift:#b892ef;
+  --p-wall:#dfe5e2; --p-glass:#7fb4cc; --p-door:#aab3af; --p-detail:#5f6a66; --p-text:#c2cac6; --p-grid:#27302d; --p-stair:#8b9591; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#141918; --panel:#1d2422; --fg:#e6ebe8; --muted:#9aa5a1; --line:#33403c;
-  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --lift:#b892ef; --plan-filter:invert(.88) hue-rotate(180deg); color-scheme:dark}
+  --accent:#ef6b6f; --route:#ff7a7e; --dot:#6bb7d9; --lift:#b892ef;
+  --p-wall:#dfe5e2; --p-glass:#7fb4cc; --p-door:#aab3af; --p-detail:#5f6a66; --p-text:#c2cac6; --p-grid:#27302d; --p-stair:#8b9591; color-scheme:dark}
 html,body{height:100%}
 body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:14px;padding-inline:16px;padding-block:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px}
@@ -104,10 +107,10 @@ async function init(){
   for(const [i,F] of FLOORS.entries()){
     const g=await gunzip(F.grid); F.type=new Uint8Array(g.length); F.cost=new Uint8Array(g.length);
     for(let k=0;k<g.length;k++){F.type[k]=g[k]>>6;F.cost[k]=g[k]&63}
-    F.img=new Image(); F.img.src=F.bg; F.dots.forEach(d=>d.f=i); F.fixes=[]; F.base=F.type.slice(); F.baseCost=F.cost.slice();
+    const V=JSON.parse(new TextDecoder().decode(await gunzip(F.vec)));F.paths={};for(const k in V)F.paths[k]=new Path2D(V[k]);
+    F.dots.forEach(d=>d.f=i); F.fixes=[]; F.base=F.type.slice(); F.baseCost=F.cost.slice();
     comps(F);
   }
-  await Promise.all(FLOORS.map(F=>F.img.decode().catch(()=>{})));
   const fl=$('floors');
   FLOORS.forEach((F,i)=>{const b=document.createElement('button');b.type='button';b.textContent=F.level+'000';b.onclick=()=>show(i);fl.appendChild(b)});
   const opts=[];FLOORS.forEach(F=>F.dots.forEach(d=>{if(d.label)opts.push(`<option value="${d.label}">${F.name}</option>`)}));
@@ -226,25 +229,42 @@ function go(){
   walk(0);
 }
 // raccoon walks each leg; between legs it rides the elevator and the view switches floor
-function walk(k){
+let walkRun=0;
+function walk(k,run){
+  if(run===undefined)run=++walkRun;if(run!==walkRun||!plan||!plan.legs||!plan.legs[k])return;   // a newer route replaced this one
   const L=plan.legs[k];show(L.f);
   const P=L.pts,seg=[0];for(let i=1;i<P.length;i++)seg.push(seg[i-1]+Math.hypot(P[i][0]-P[i-1][0],P[i][1]-P[i-1][1]));
   const tot=seg[seg.length-1],t0=performance.now(),dur=Math.min(8000,Math.max(2200,tot*14));
   const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
   const step=now=>{const u=reduce?1:Math.min(1,(now-t0)/dur),d=u*tot;let i=1;while(i<seg.length-1&&seg[i]<d)i++;
     const f=(d-seg[i-1])/((seg[i]-seg[i-1])||1);rac={k,d,x:P[i-1][0]+(P[i][0]-P[i-1][0])*f,y:P[i-1][1]+(P[i][1]-P[i-1][1])*f,left:P[i][0]<P[i-1][0]};draw();
+    if(run!==walkRun)return;
     if(u<1){anim=requestAnimationFrame(step);return}
     if(k+1<plan.legs.length){const b=$('banner');b.textContent=`Elevator ${plan.lift} → ${FLOORS[plan.legs[k+1].f].name}`;b.hidden=false;
-      setTimeout(()=>{b.hidden=true;walk(k+1)},reduce?300:1400)}};
+      setTimeout(()=>{if(run!==walkRun)return;b.hidden=true;walk(k+1,run)},reduce?300:1400)}};
   anim=requestAnimationFrame(step);
 }
 
 // ---------- drawing ----------
+// the floor plan is drawn from the CAD lines (vector), so it stays sharp at any zoom.
+// stroke weights are in plan units (0.1 m) with a minimum on-screen width so thin lines never vanish.
+const STYLE=[['grid','--p-grid',.25,.6],['detail','--p-detail',.3,.6],['stair','--p-stair',.35,.7],['stair_f','--p-stair',0,0],
+  ['glass','--p-glass',.45,.8],['door','--p-door',.4,.8],['wall','--p-wall',.7,1.1],['wall_f','--p-wall',0,0],['text','--p-text',.3,.75]];
+let planCv=null,planKey='';
+function planLayer(F){const dark=css('--p-wall');
+  const key=[cur,view.s,view.x,view.y,cv.width,cv.height,dark].join('|');if(planCv&&planKey===key)return planCv;
+  planCv=planCv||document.createElement('canvas');planCv.width=cv.width;planCv.height=cv.height;planKey=key;
+  const c=planCv.getContext('2d');c.setTransform(1,0,0,1,0,0);c.clearRect(0,0,planCv.width,planCv.height);
+  c.setTransform(view.s,0,0,view.s,view.x,view.y);c.lineCap=c.lineJoin='round';
+  for(const[k,tok,w,minPx]of STYLE){const p=F.paths[k];if(!p)continue;const col=css(tok);
+    if(k.endsWith('_f')){c.fillStyle=col;c.fill(p);continue}
+    c.strokeStyle=col;c.lineWidth=Math.max(w,minPx*devicePixelRatio/view.s);c.stroke(p)}
+  return planCv}
 function draw(){
-  const F=FLOORS[cur];if(!F||!F.img)return;
+  const F=FLOORS[cur];if(!F||!F.paths)return;
   ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,cv.width,cv.height);
   ctx.setTransform(view.s,0,0,view.s,view.x,view.y);
-  ctx.filter=css('--plan-filter')||'none';ctx.drawImage(F.img,0,0);ctx.filter='none';
+  ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(planLayer(F),0,0);ctx.setTransform(view.s,0,0,view.s,view.x,view.y);
   const k=F.bgW/F.w,px=v=>v*k,u=devicePixelRatio/view.s;
   if(plan&&plan.legs)plan.legs.forEach((L,li)=>{if(L.f!==cur)return;
     ctx.lineJoin=ctx.lineCap='round';ctx.strokeStyle=css('--route');ctx.globalAlpha=.28;ctx.lineWidth=8*u;

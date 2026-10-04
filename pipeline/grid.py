@@ -22,8 +22,7 @@ def load(n):
         c=d.get('color') or d.get('fill') or (0,0,0)
         if c[0]>0.5: continue
         R=d['rect']*m; PW,PH=p.rect.width,p.rect.height
-        if R.width>0.6*PW or R.height>0.6*PH: continue          # sheet frame
-        if R.x0>0.8*PW and R.y0>0.75*PH: continue               # title block
+        # (the sheet frame and title block are on layer 0, which isn't a wall layer)
         its=d['items']
         if len(its)>=4 and all(it[0]=='l' for it in its) and 'f' not in d['type']:
             # polyline door swings (AQ 1000 draws arcs as short lines; double doors put two arcs in one path)

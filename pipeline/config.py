@@ -2,11 +2,12 @@
 # scale = the drawing scale printed in the title block (1:400 -> 400)
 # floor = first digit of room numbers on that level (used to clean up OCR)
 # level = vertical order, used for elevator/stair routing
+# courtyard = the central courtyard is walkable ground on this level (only 3000; above it's open air)
 # shift = [dx, dy] in PDF points to line this sheet up with the others (the 2000 sheet is drawn 23 pt lower)
 FLOORS = {
     "aq1": {"name": "AQ 1000 level", "scale": 400, "floor": "1", "level": 1},
     "aq2": {"name": "AQ 2000 level", "scale": 400, "floor": "2", "level": 2, "shift": [0, -23]},
-    "aq3": {"name": "AQ 3000 level", "scale": 400, "floor": "3", "level": 3},
+    "aq3": {"name": "AQ 3000 level", "scale": 400, "floor": "3", "level": 3, "courtyard": True},
     "aq4": {"name": "AQ 4000 level", "scale": 400, "floor": "4", "level": 4},
     "aq5": {"name": "AQ 5000 level", "scale": 400, "floor": "5", "level": 5},
     "aq6": {"name": "AQ 6000 level", "scale": 400, "floor": "6", "level": 6},
@@ -30,7 +31,7 @@ def CLIP(rect, n):
 
 # CAD layers (the part after "|", the prefix differs per floor). Walls are built only from these,
 # so furniture, the gross-area outline, grid lines and room-number text don't block anything.
-WALL_LAYERS = {"AWA", "AWAFU", "AGL", "AWACO", "AWAMO", "ADO", "AFLST"}
+WALL_LAYERS = {"AWA", "AWAFU", "AGL", "AWACO", "AWAMO", "ADO", "AFLST", "AFLOT"}   # AFLOT: floor edge at the courtyard on 6000
 TEXT_LAYER = "RM$TXT"
 def layer(d):
     return (d.get("layer") or "").split("|")[-1]

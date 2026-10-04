@@ -42,6 +42,42 @@ shafts.sort(key=lambda s: (round(s[1] / 200), s[0]))
 def pool(a):
     return a.reshape(H, F, W, F)
 
+GROUPS = {   # CAD layer -> drawing group (stroke weight in plan units, before zoom)
+    "AWA": "wall", "AWAFU": "wall", "AWACO": "wall", "AWAMO": "wall", "AFLOT": "wall",
+    "AGL": "glass", "ADO": "door", "AFLST": "stair",
+    "AFLSP": "detail", "AFL": "detail", "AFLWD": "detail", "AFLTE": "detail", "SIWA": "detail",
+    "RM$TXT": "text", "SGRID": "grid",
+}
+def vector_plan(n, S, X0, Y0, X1, Y1):
+    from config import MAT, layer
+    p = fitz.open(PDF(n))[0]; m = MAT(p, n)
+    box = fitz.Rect(X0 / S, Y0 / S, X1 / S, Y1 / S)
+    out = {}
+    f2 = lambda v: f"{v:.1f}".rstrip("0").rstrip(".")
+    for d in p.get_drawings():
+        g = GROUPS.get(layer(d))
+        if not g: continue
+        r = d["rect"] * m      # (straight lines have zero-height boxes, so compare edges, not Rect.intersects)
+        if r.x1 < box.x0 or r.x0 > box.x1 or r.y1 < box.y0 or r.y0 > box.y1: continue
+        fill = "f" in d["type"] and not (d.get("color") and "s" in d["type"] and False)
+        key = g + ("_f" if "f" in d["type"] else "")
+        parts = out.setdefault(key, []); last = None
+        P = lambda q: (f2(q.x * S - X0), f2(q.y * S - Y0))
+        for it in d["items"]:
+            if it[0] == "l":
+                a_, b_ = P(it[1] * m), P(it[2] * m)
+                parts.append(("L" if a_ == last else f"M{a_[0]} {a_[1]}L") + f"{b_[0]} {b_[1]}"); last = b_
+            elif it[0] == "c":
+                q = [P(it[k] * m) for k in (1, 2, 3, 4)]
+                parts.append(("" if q[0] == last else f"M{q[0][0]} {q[0][1]}") + "C" + " ".join(f"{x} {y}" for x, y in q[1:])); last = q[3]
+            elif it[0] in ("re", "qu"):
+                qd = (it[1].quad if it[0] == "re" else it[1])
+                q = [P(v * m) for v in (qd.ul, qd.ur, qd.lr, qd.ll)]
+                parts.append(f"M{q[0][0]} {q[0][1]}" + "".join(f"L{x} {y}" for x, y in q[1:]) + "Z"); last = None
+        if d.get("closePath") and parts: parts.append("Z"); last = None
+    blob = json.dumps({k: "".join(v) for k, v in out.items()}, separators=(",", ":")).encode()
+    return base64.b64encode(gzip.compress(blob, 9)).decode()
+
 floors_out = []
 for n in ids:
     cfg = FLOORS[n]
@@ -81,6 +117,16 @@ for n in ids:
         for c in (o["a"], o["b"]):
             if c: has_door.add(c)
 
+    if not cfg.get("courtyard"):
+        # Above level 3000 the courtyard is open to the sky, but tiny gaps in the drawing can join it
+        # to the corridor around it. Block any open space wider than 8 m inside such a huge area:
+        # corridors are never that wide, so they stay walkable.
+        free = free.copy()
+        area_ = np.bincount(lab.ravel()) * 0.01
+        for c in [int(c) for c in np.nonzero(area_ >= 3000)[0] if c]:
+            reg = (lab == c).astype(np.uint8)
+            core = cv2.morphologyEx(reg, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (81, 81)))
+            free &= ~(cv2.dilate(core, np.ones((5, 5), np.uint8)) > 0)
     fr = free[Y0:Y1, X0:X1]; lb = lab[Y0:Y1, X0:X1]
     walk = pool(fr).mean((1, 3)) >= 0.4
     # majority region per 0.2 m cell
@@ -90,6 +136,7 @@ for n in ids:
     # big open areas (courtyard, lobbies, covered walkways) have no door arcs but are walkable
     area = np.bincount(lab.ravel(), minlength=lab.max() + 1) * 0.01
     big = set(int(c) for c in np.nonzero(area >= 200)[0] if c)
+
     keep = np.zeros(lab.max() + 1, bool); keep[list(has_door | big)] = True
     hall = np.zeros(lab.max() + 1, bool); hall[[c for c in has_door if is_hall(c)] + list(big - has_door)] = True
     typ[walk & (reg == 0)] = 3
@@ -160,19 +207,15 @@ for n in ids:
         lifts.append({"id": f"E{k + 1}", "x": round(cx, 1), "y": round(cy, 1),
                       "sx": int(xx[j] + x0), "sy": int(yy[j] + y0)})
 
-    # background plan, 1 px = 0.1 m
-    p = fitz.open(PDF(n))[0]
-    pix = p.get_pixmap(matrix=fitz.Matrix(S, S), colorspace=fitz.csGRAY,
-                       clip=CLIP(fitz.Rect(X0 / S, Y0 / S, X1 / S, Y1 / S), n))
-    img = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w)
-    img = np.where(img < 235, img, 255).astype(np.uint8)
-    _, png = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    # the plan itself as vector paths (sharp at any zoom), in plan units: 1 unit = 0.1 m,
+    # same origin as the routing grid. Grouped by what they are so the page can style them.
+    vec = vector_plan(n, S, X0, Y0, X1, Y1)
+    bgW, bgH = int(X1 - X0), int(Y1 - Y0)
 
     floors_out.append({
         "id": n, "name": cfg["name"], "level": cfg["level"], "res": 0.2, "w": int(W), "h": int(H),
         "grid": base64.b64encode(gzip.compress(packed.tobytes(), 9)).decode(),
-        "bg": "data:image/png;base64," + base64.b64encode(png).decode(),
-        "bgW": int(img.shape[1]), "bgH": int(img.shape[0]),
+        "vec": vec, "bgW": bgW, "bgH": bgH,
         "dots": dots, "nodoor": nodoor, "lifts": lifts, "origin": [int(X0), int(Y0)], "pxPerPt": S})
     print(n, "cells", W, H, "doors", len(dots), "labelled", sum(1 for x in dots if x["label"]),
           "lifts", len(lifts), "hall%", round((typ == 1).mean() * 100, 1))
